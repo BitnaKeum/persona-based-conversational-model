@@ -3,9 +3,9 @@
 This is the code for our paper "[Persona-Identified Chatbot through Small-Scale Modeling and Data Transformation](https://www.mdpi.com/2079-9292/13/8/1409)".
 
 <p align="center">
-  <img src="model_architecture.png" width="70%" height=75%">
+  <img src="model_architecture.png" width="60%" height=65%">
 </p>
-
+<br>
 
 ## Installation
 
@@ -19,11 +19,11 @@ pip install -r requirements.txt
 pip install --upgrade paddlenlp>=2.0.0rc -i https://pypi.org/simple
 pip install paddlepaddle -i https://mirror.baidu.com/pypi/simple
 ```
-
+<br>
 
 ## Training
 
-- We transformed datasets of DailyDialog, EmpatheticDialogues, and Topcial-Chat through our proposed CC2PC (Chit-Chat to Persona-Chat) framework.
+- We transformed datasets of [DailyDialog](https://aclanthology.org/I17-1099/), [EmpatheticDialogues](https://aclanthology.org/P19-1534/), and [Topical-Chat](https://arxiv.org/abs/2308.11995) through our proposed CC2PC (Chit-Chat to Persona-Chat) framework.
 - We utilized 10,000 samples from the transformed datasets as training data.
 
 ```shell
@@ -48,7 +48,7 @@ python3 finetune_trainer.py \
     --save_steps 1000 \
     --gradient_accumulation_steps 4
 ```
-
+<br>
 
 ## Evaluation
 
@@ -75,6 +75,7 @@ python3 finetune_trainer.py \
     --predict_with_generate
 done
 ```
+<br>
 
 ## Results
 
@@ -98,13 +99,15 @@ done
     |-------|-------:|-------:|-------:|
     | Llama-2 (7B) | 0.24 | 0.66 | 0.83 |
     | Ours | 1.33 | 0.77 | 0.86 |
-  
+<br>
+
 
 ## Dialogue Example
 
 <p align="center">
   <img src="dialogue_example.png" width="70%" height="80%">
 </p>
+<br>
 
 ## Citation
 ```bib
