@@ -52,7 +52,7 @@ python3 finetune_trainer.py \
 
 ## Evaluation
 
-- We utilized the test set of [Multi-Session Chat (MSC) dataset](https://parl.ai/projects/msc/) as evaluation data.
+- We utilized the test set of [Multi-Session Chat (MSC)](https://parl.ai/projects/msc/) dataset as evaluation data.
 - We conducted evaluations for each dialogue session.
 
 ```shell
@@ -84,21 +84,21 @@ done
     | Model | Consistency | Fluency | Engagingness |
     |-------|-------:|-------:|-------:|
     | Llama-2 (7B) | 0.89 | 1.17 | 0.84 |
-    | Ours | 1.19 | 1.81 | 1.10 |
+    | Ours (406M) | **1.19** | **1.81** | **1.10** |
 
 - GPT4-based Evaluation
 
     | Model | Consistency | Fluency | Engagingness |
     |-------|-------:|-------:|-------:|
-    | Llama-2 (7B) | 0.68 | 1.28 | 0.97 |
-    | Ours | 0.80 | 1.81 | 0.69 |
+    | Llama-2 (7B) | 0.68 | 1.28 | **0.97** |
+    | Ours (406M) | **0.80** | **1.81** | 0.69 |
 
 - Quantitative Evaluation
 
     | Model | BLEU | Distinct-2 | BERTScore |
     |-------|-------:|-------:|-------:|
     | Llama-2 (7B) | 0.24 | 0.66 | 0.83 |
-    | Ours | 1.33 | 0.77 | 0.86 |
+    | Ours (406M) | **1.33** | **0.77** | **0.86** |
 <br>
 
 
