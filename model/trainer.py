@@ -1981,16 +1981,16 @@ class Trainer:
             return loss_mb.reduce_mean().detach().to(self.args.device)
 
         with self.autocast_smart_context_manager():
-            loss, memory_classification_loss = self.compute_loss(model, inputs)
+            loss, persona_identification_loss = self.compute_loss(model, inputs)
 
         if self.args.n_gpu > 1:
             loss = loss.mean()  # mean() to average on multi-gpu parallel training
-            memory_classification_loss = memory_classification_loss.mean()  # mean() to average on multi-gpu parallel training
+            persona_identification_loss = persona_identification_loss.mean()  # mean() to average on multi-gpu parallel training
 
         if self.args.gradient_accumulation_steps > 1 and not self.deepspeed:
             # deepspeed handles loss scaling by gradient_accumulation_steps in its `backward`
             loss = loss / self.args.gradient_accumulation_steps
-            memory_classification_loss = memory_classification_loss / self.args.gradient_accumulation_steps
+            persona_identification_loss = persona_identification_loss / self.args.gradient_accumulation_steps
 
         if self.do_grad_scaling:
             self.scaler.scale(loss).backward()
@@ -2000,9 +2000,9 @@ class Trainer:
         elif self.deepspeed:
             # loss gets scaled under gradient_accumulation_steps in deepspeed
             loss = self.deepspeed.backward(loss)
-        else:
+        else:   # 여기로 옴
             alpha = 0.8
-            total_loss = alpha * loss + (1 - alpha) * memory_classification_loss
+            total_loss = alpha * loss + (1 - alpha) * persona_identification_loss
             total_loss.backward()
 
         return total_loss.detach()
@@ -2017,7 +2017,7 @@ class Trainer:
             labels = inputs.pop("labels")
         else:
             labels = None
-        outputs, memory_classification_loss = model(**inputs)
+        outputs, persona_identification_loss = model(**inputs)
 
         # Save past state if it exists
         # TODO: this needs to be fixed and made cleaner later.
@@ -2028,9 +2028,9 @@ class Trainer:
             loss = self.label_smoother(outputs, labels) # Negative Log-Likelihood Loss + Smoothing
         else:
             # We don't use .loss here since the model may return tuples instead of ModelOutput.
-            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0]
+            loss = outputs["loss"] if isinstance(outputs, dict) else outputs[0] #  여기로 옴
 
-        return (loss, memory_classification_loss, outputs) if return_outputs else (loss, memory_classification_loss)
+        return (loss, persona_identification_loss, outputs) if return_outputs else (loss, persona_identification_loss)
 
     def is_local_process_zero(self) -> bool:
         """
@@ -2434,7 +2434,6 @@ class Trainer:
 
             # Prediction step
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
-            # logits는 사실 generated_tokens
 
             if is_torch_tpu_available():
                 xm.mark_step()
@@ -2646,7 +2645,7 @@ class Trainer:
             else:
                 if has_labels:
                     with self.autocast_smart_context_manager():
-                        loss, memory_classification_loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
+                        loss, persona_identification_loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
                     loss = loss.mean().detach()
 
                     if isinstance(outputs, dict):
@@ -2865,9 +2864,6 @@ class Trainer:
 
         return git_head_commit_url
 
-    #
-    # Deprecated code
-    #
 
     def prediction_loop(
         self,

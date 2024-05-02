@@ -87,7 +87,7 @@ def build_compute_metrics_fn(task_name: str, tokenizer: PreTrainedTokenizer) -> 
 
     def decode_pred(pred: EvalPrediction) -> Tuple[List[str], List[str]]:
         pred_str = tokenizer.batch_decode(pred.predictions, skip_special_tokens=True)
-        pred.label_ids[pred.label_ids==-100] = 1
+        pred.label_ids[pred.label_ids==-100] = 1 ## 수정
         label_str = tokenizer.batch_decode(pred.label_ids, skip_special_tokens=True)
         pred_str = lmap(str.strip, pred_str)
         label_str = lmap(str.strip, label_str)
@@ -233,7 +233,7 @@ class Seq2SeqDataset(AbstractSeq2SeqDataset):
 
 
 class Seq2SeqDataCollator:
-    
+
     def __init__(self, tokenizer, data_args, tpu_num_cores=None):
         self.tokenizer = tokenizer
         self.pad_token_id = tokenizer.pad_token_id
@@ -250,16 +250,15 @@ class Seq2SeqDataCollator:
 
     def __call__(self, batch) -> Dict[str, torch.Tensor]:
         batch = self._encode(batch)
-        input_ids, attention_mask, labels, persona_ids, persona_attention_mask, memory_labels, speaker_ids, persona_speaker_ids = (
+        input_ids, attention_mask, labels, persona_ids, persona_attention_mask, memory_labels = (
             batch["input_ids"],
             batch["attention_mask"],
             batch["labels"],
             batch["persona_ids"],
             batch["persona_attention_mask"],
             batch["memory_labels"],
-            batch["speaker_ids"],
-            batch["persona_speaker_ids"],
         )
+
         batch = {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
@@ -267,8 +266,6 @@ class Seq2SeqDataCollator:
             "persona_ids": persona_ids,
             "persona_attention_mask": persona_attention_mask,
             "memory_labels": memory_labels,
-            "speaker_ids": speaker_ids,
-            "persona_speaker_ids": persona_speaker_ids,
         }
         return batch
 
@@ -295,23 +292,24 @@ class Seq2SeqDataCollator:
                 context_start_idx = r.span()[0]
                 context_start_token = r.group()
                 break
-            if context_start_token == '<agent>' or context_start_token == '<user>': # persona, context 존재
+            if context_start_token == '<agent>' or context_start_token == '<user>':  # persona, context 존재
                 persona = source[:context_start_idx]
                 source = source[context_start_idx:]
             else:  # persona만 존재
                 persona = source
                 source = ''
 
-            # source의 발화 수가 context_size보다 크면 뒷단의 발화 제거, 작으면 <empty> 토큰으로 채움
-            utter_num = source.count('<user>') + source.count('<agent>')
-            if utter_num > context_size:
+            utter_cnt = source.count('<user>') + source.count('<agent>')
+            # 예외처리: 입력된 발화 수가 context_size보다 큰 경우
+            # 앞단의 발화 제거, 작으면 <empty>로 채움
+            if utter_cnt > context_size:
                 speaker_result = speaker_pattern.finditer(source)
-                speaker_idxes = [r.span()[0] for r in speaker_result]   # speaker special token의 시작 인덱스
-                source = source[:speaker_idxes[context_size-utter_num]]
+                speaker_idxes = [r.span()[0] for r in speaker_result]   # speaker special token의 시작 index
+                source = source[speaker_idxes[utter_cnt-context_size]:]
             else:
                 user_idx, agent_idx = source.find('<user>'), source.find('<agent>')
                 first_speaker = '<agent>' if agent_idx < user_idx else '<user>'
-                for _ in range(context_size - utter_num):
+                for _ in range(context_size - utter_cnt):
                     if first_speaker == '<user>':
                         source = '<agent><empty>' + source
                         first_speaker = '<agent>'
@@ -321,16 +319,18 @@ class Seq2SeqDataCollator:
             source = source.replace('<user>', '</s><user>').replace('<agent>', '</s><agent>')[4:]
             dict_data['src_texts'] = source
 
-            # 페르소나 문자열을 special token 포함해서 분리하여 리스트 얻음
+            # 페르소나 문장을 special token 포함해 분리하기
             personas = persona_pattern.split(persona)[1:]
             personas = [personas[i] + personas[i + 1] for i in range(0, len(personas), 2)]
-            # ['<agent_persona>하이', '<user_persona>오', '<user_persona>ㅎㅎ', '<agent_persona>ㅋㅋ']
+            # '<agent_persona>hi<user_persona>hello<user_persona>zz<agent_persona>zz'
+            # -> ['<agent_persona>hi', '<user_persona>hello', '<user_persona>zz', '<agent_persona>zz']
 
-            # 예외처리
+            # 예외 처리: 입력된 페르소나 문장 수가 메모리 사이즈를 넘는 경우
             if len(personas) > mem_size:
-                if '<ref>' in persona:
+                if '<REF>' in persona:
+                    # <REF>가 달리지 않은 candidate personas 중 랜덤 제거
                     for persona_idx, persona in enumerate(personas):
-                        if '<ref>' in persona:
+                        if '<REF>' in persona:
                             ref_persona = personas[persona_idx]
                             del personas[persona_idx]
                             break
@@ -340,12 +340,13 @@ class Seq2SeqDataCollator:
                     personas = random.sample(personas, mem_size)
 
             for mem_idx, persona in enumerate(personas):
-                if '<ref>' in persona:
+                if '<REF>' in persona:
                     dict_data['memory_label'] = mem_idx
-                    personas[mem_idx] = persona.replace('<ref>', '')    # 학습을 위해 pseudo answer label을 의미하는 태그를 제거
+                    personas[mem_idx] = persona.replace('<REF>', '')    # 학습을 위해 pseudo answer label을 의미하는 태그를 제거
                     break
-            if 'memory_label' not in dict_data:       # if pseudo answer label does not exist, then NO_REF label is labeled
-                dict_data['memory_label'] = mem_size  # ex: mem_size가 10인 경우, 0~9는 주어진 메모리 요소에 해당하고 10은 NO_REF을 의미
+            # if pseudo answer label does not exist, then NO_REF label is labeled
+            if 'memory_label' not in dict_data:
+                dict_data['memory_label'] = mem_size
 
             dict_data['personas'] = personas
             new_batch.append(dict_data)
@@ -375,7 +376,7 @@ class Seq2SeqDataCollator:
 
             # fill mem_size
             mem_cnt = persona_ids.shape[0]
-            if mem_cnt > mem_size:  # 주어진 메모리가 mem_size를 초과하면, 오래된 메모리를 제거
+            if mem_cnt > mem_size:  # 입력된 메모리가 mem_size를 초과하면, 앞단의 오래된 메모리를 제거
                 new_persona_ids = new_persona_ids[-mem_size:]
                 new_persona_attn_mask = new_persona_attn_mask[-mem_size:]
                 mem_cnt = mem_size
@@ -383,8 +384,8 @@ class Seq2SeqDataCollator:
             if add_cnt > 0:
                 add_mem_ids = torch.full([add_cnt, max_seq_len], self.pad_token_id)
                 add_mem_ids[:, 0] = 0       # <s>
-                add_mem_ids[:, 1] = 30004   # <empty>
-                add_mem_ids[:, 2] = 1       # </s>
+                add_mem_ids[:, 1] = 50269   # <empty>
+                add_mem_ids[:, 2] = 2       # </s>
                 add_mem_attn_mask = torch.zeros([add_cnt, max_seq_len], dtype=int)
                 add_mem_attn_mask[:, 0] = 1  # <s>
                 add_mem_attn_mask[:, 1] = 1  # <empty>
@@ -394,9 +395,9 @@ class Seq2SeqDataCollator:
 
             # add NO_REF memory
             add_mem_ids = torch.full([1, max_seq_len], self.pad_token_id)
-            add_mem_ids[:, 0] = 0  # <s>
-            add_mem_ids[:, 1] = 30005  # <no_ref>
-            add_mem_ids[:, 2] = 1  # </s>
+            add_mem_ids[:, 0] = 0      # <s>
+            add_mem_ids[:, 1] = 50270  # <no_ref>
+            add_mem_ids[:, 2] = 2      # </s>
             add_mem_attn_mask = torch.zeros([1, max_seq_len], dtype=int)
             add_mem_attn_mask[:, 0] = 1  # <s>
             add_mem_attn_mask[:, 1] = 1  # <no_ref>
@@ -407,11 +408,11 @@ class Seq2SeqDataCollator:
             # shuffle memory (except NO_REF label)
             rand_idxes = list(range(new_persona_ids.size(0) - 1))
             random.shuffle(rand_idxes)
-            rand_idxes += [mem_size]  # NO_REF label은 메모리의 맨 뒤에 배치
+            rand_idxes += [mem_size]  # NO_REF label은 메모리의 맨 뒤에 배치하여 레이블 번호 고정
             rand_idxes = torch.tensor(rand_idxes)
             new_persona_ids = new_persona_ids[rand_idxes]
             new_persona_attn_mask = new_persona_attn_mask[rand_idxes]
-            # shuffle에 따른 memory_labels 수정
+            # According to shuffling, modify memory label
             for idx, rand_idx in enumerate(rand_idxes):
                 if rand_idx.item() == memory_labels[batch_num]:
                     new_memory_labels.append(idx)
@@ -435,71 +436,9 @@ class Seq2SeqDataCollator:
         return persona_ids_encoding, persona_attn_mask_encoding, memory_labels
 
 
-    def add_speaker_emb(self, input_ids) -> torch.Tensor:
-        speaker_embeds = []
-        for batch_idx in range(input_ids.size(0)):
-            tokens = input_ids[batch_idx].tolist()
-            tokens_len = len(tokens)
-            special_token_idxes = list(filter(lambda e: tokens[e] >= 30000 and tokens[e] <= 30001, range(len(tokens))))
-            # <user>: 30000, <agent>: 30001
-
-            speaker_embed = [0] * tokens_len
-            for cnt, idx in enumerate(special_token_idxes):
-                if tokens[idx + 1] == 30004:  # <user><empty> or <agent><empty>
-                    speaker_embed[idx:] = [3] * (tokens_len - idx)
-                    continue
-
-                if tokens[idx] == 30000:  # <user>
-                    speaker_embed[idx:] = [0] * (tokens_len - idx)
-                elif tokens[idx] == 30001:  # <agent>
-                    speaker_embed[idx:] = [1] * (tokens_len - idx)
-            speaker_embed[0] = speaker_embed[1]  # 맨앞 <s>
-
-            try:    # pad token exists
-                pad_start_idx = tokens.index(self.pad_token_id)
-                speaker_embed[pad_start_idx:] = [3] * (tokens_len - pad_start_idx)  # padding
-            except: # pad token not exists
-                pad_start_idx = -1
-
-            speaker_embeds.append(speaker_embed)
-        speaker_embeds = torch.tensor(speaker_embeds)
-
-        return speaker_embeds
-
-    def add_persona_speaker_emb(self, persona_ids) -> torch.Tensor:
-        persona_speaker_embeds = []
-        for batch_idx in range(persona_ids.size(0)):
-            one_batch_samples = []
-            for mem_idx in range(persona_ids.size(1)):
-                tokens = persona_ids[batch_idx][mem_idx].tolist()
-                tokens_len = len(tokens)
-
-                # <user>: 30000, <agent>: 30001, <agent_persona>: 30002, <user_persona>: 30003, <empty>: 30004, <no_ref>: 30005
-                if tokens[1] == 30002:   # <agent_persona>
-                    persona_speaker_embed = [1] * tokens_len
-                elif tokens[1] == 30003:    # <user_persona>
-                    persona_speaker_embed = [0] * tokens_len
-                elif tokens[1] == 30004:  # <empty>
-                    persona_speaker_embed = [3] * tokens_len
-                elif tokens[1] == 30005:  # <no_ref>
-                    persona_speaker_embed = [2] * tokens_len
-
-                try:  # pad token exists
-                    pad_start_idx = tokens.index(self.pad_token_id)
-                    persona_speaker_embed[pad_start_idx:] = [3] * (tokens_len - pad_start_idx)  # padding
-                except:  # pad token not exists
-                    pad_start_idx = -1
-
-                one_batch_samples.append(persona_speaker_embed)
-            persona_speaker_embeds.append(one_batch_samples)
-        persona_speaker_embeds = torch.tensor(persona_speaker_embeds)
-
-        return persona_speaker_embeds
-
-
     def _encode(self, batch) -> Dict[str, torch.Tensor]:
         CONTEXT_SIZE = 10
-        MEM_SIZE = 10
+        MEM_SIZE = 20
 
         # preprocess batch
         batch = self.preprocess_batch(batch, context_size=CONTEXT_SIZE, mem_size=MEM_SIZE)
@@ -520,7 +459,7 @@ class Seq2SeqDataCollator:
             labels = self.tokenizer(
                 [x["tgt_texts"] for x in batch],
                 max_length=self.data_args.max_target_length,
-                padding="max_length" if self.tpu_num_cores is not None else "longest",
+                padding="max_length" if self.tpu_num_cores is not None else "longest",  # TPU hack
                 return_tensors="pt",
                 **self.dataset_kwargs,
             )
@@ -538,7 +477,6 @@ class Seq2SeqDataCollator:
                 )
             except:
                 raise ValueError("Error: There are data that don't have memory !")
-
             persona_ids_list.append(persona_inputs['input_ids'])
             persona_attn_mask_list.append(persona_inputs['attention_mask'])
 
@@ -550,12 +488,6 @@ class Seq2SeqDataCollator:
         batch_encoding["persona_ids"] = persona_ids_encoding    # (batch, mem_size+1, max_seq_len)
         batch_encoding["persona_attention_mask"] = persona_attn_mask_encoding   # (batch, mem_size+1, max_seq_len)
         batch_encoding["memory_labels"] = memory_labels # (batch, cxt_size)
-
-        # add speaker embedding
-        speaker_embeds = self.add_speaker_emb(batch_encoding['input_ids'])
-        persona_speaker_embeds = self.add_persona_speaker_emb(batch_encoding['persona_ids'])    # (batch, mem_size+1, max_seq_len)
-        batch_encoding['speaker_ids'] = speaker_embeds
-        batch_encoding['persona_speaker_ids'] = persona_speaker_embeds
 
         return batch_encoding.data
 
@@ -797,20 +729,20 @@ def freeze_embeds(model):
             freeze_params(d.embed_positions)
             freeze_params(d.embed_tokens)
 
-def freeze_context_embeds(model):
-    """Freeze embeddings of context"""
-    freeze_params(model.shared)
-    freeze_params(model.encoder)
-
-
 def freeze_persona_embeds(model):
     """Freeze embeddings of persona"""
     freeze_params(model.persona_shared)
+
     freeze_params(model.persona_encoder)
     # model.persona_encoder.layers.*.~
     # model.persona_encoder.embed_positions
     # model.persona_encoder.layernorm_embedding
-    model.shared.weight.requires_grad = True    # exception 처리
+    # freeze_params(model.persona_encoder.embed_tokens)
+    # freeze_params(model.persona_encoder.speaker_embed_tokens)
+
+    # freeze_params(model.sentence_pool_layer)
+
+    model.shared.weight.requires_grad = True
 
 
 def grad_status(model: nn.Module) -> Iterable:

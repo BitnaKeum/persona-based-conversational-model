@@ -45,12 +45,7 @@ from transformers.models.bart.configuration_bart import BartConfig
 
 from transformers import BartTokenizer, AutoTokenizer
 
-import inspect
-from transformers.generation_beam_constraints import Constraint
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
-from transformers.generation_logits_process import LogitsProcessorList
-from transformers.generation_stopping_criteria import StoppingCriteriaList
-from transformers.generation_beam_search import BeamSearchScorer, ConstrainedBeamSearchScorer
 
 
 logger = logging.get_logger(__name__)
@@ -99,8 +94,6 @@ def _make_causal_mask(input_ids_shape: torch.Size, dtype: torch.dtype, past_key_
 def _expand_mask(mask: torch.Tensor, dtype: torch.dtype, tgt_len: Optional[int] = None):
     """
     Expands attention_mask from `[bsz, seq_len]` to `[bsz, 1, tgt_seq_len, src_seq_len]`.
-    tgt_seq_len: sequence length of Query.
-    src_seq_len: sequence length of Key/Value.
     """
     bsz, src_len = mask.size()
     tgt_len = tgt_len if tgt_len is not None else src_len
@@ -117,9 +110,8 @@ def makeMultiTurnChatbot(model_name, from_file=None, device="cuda:0"):
         model_name,
         additional_special_tokens=[
             '<user>', '<agent>', '<agent_persona>', '<user_persona>', '<empty>', '<no_ref>',
-            'agent', 'user', '@이름@', '@브랜드명@', '@홈페이지@', '@영화@', '@날짜@',
         ],
-        # <user>: 30000, <agent>: 30001, <agent_persona>: 30002, <user_persona>: 30003, <empty>: 30004, <no_ref>: 30005
+        # <user>: 50265, <agent>: 50266, <agent_persona>: 50267, <user_persona>: 50268, <empty>: 50269, <no_ref>: 50270
         use_fast=False
     )
     model = BartForDialogueGeneration.from_pretrained(model_name).to(device)
@@ -221,8 +213,7 @@ class BartAttention(nn.Module):
             value_states = past_key_value[1]
         elif is_cross_attention:
             # cross_attentions
-            key_states = self._shape(self.k_proj(key_value_states), -1, bsz)    # (batch, num_heads, src_len, head_dim)
-            # self._shape(): tensor.view(bsz(1st parameter), seq_len(2nd parameter), self.num_heads, self.head_dim).transpose(1, 2).contiguous()
+            key_states = self._shape(self.k_proj(key_value_states), -1, bsz) # (batch, num_heads, src_len, head_dim)
             value_states = self._shape(self.v_proj(key_value_states), -1, bsz)
         elif past_key_value is not None:
             # reuse k, v, self_attention
@@ -293,9 +284,9 @@ class BartAttention(nn.Module):
 
         # (batch*num_heads, cxt_size, head_dim)
         attn_output = (
-            attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)   # (batch, num_heads, cxt_size, head_dim)
-            .transpose(1, 2)    # (batch, cxt_size, num_heads, head_dim)
-            .reshape(bsz, tgt_len, embed_dim)   # (batch, cxt_size, num_heads*head_dim)
+            attn_output.view(bsz, self.num_heads, tgt_len, self.head_dim)  # (batch, num_heads, cxt_size, head_dim)
+                .transpose(1, 2)  # (batch, cxt_size, num_heads, head_dim)
+                .reshape(bsz, tgt_len, embed_dim)  # (batch, cxt_size, num_heads*head_dim)
         )
 
         attn_output = self.out_proj(attn_output)    # out_proj: nn.Linear()
@@ -402,8 +393,8 @@ class BartDecoderLayer(nn.Module):
 
     def forward(
         self,
-        hidden_states: torch.Tensor,    # input_embeds(labels에 대한) +  positional_embeds
-        attention_mask: Optional[torch.Tensor] = None, # combined_attention_mask
+        hidden_states: torch.Tensor,
+        attention_mask: Optional[torch.Tensor] = None,
         encoder_hidden_states: Optional[torch.Tensor] = None,
         encoder_attention_mask: Optional[torch.Tensor] = None,
         past_key_value: Optional[Tuple[torch.Tensor]] = None,
@@ -646,7 +637,7 @@ class BartEncoder(BartPretrainedModel):
         embed_tokens (torch.nn.Embedding): output embedding
     """
 
-    def __init__(self, config: BartConfig, embed_tokens: Optional[nn.Embedding] = None, speaker_embed_tokens: Optional[nn.Embedding] = None):
+    def __init__(self, config: BartConfig, embed_tokens: Optional[nn.Embedding] = None):
         super().__init__(config)
 
         self.dropout = config.dropout
@@ -662,9 +653,6 @@ class BartEncoder(BartPretrainedModel):
         else:
             self.embed_tokens = nn.Embedding(config.vocab_size, embed_dim, padding_idx=self.padding_idx)
 
-        if speaker_embed_tokens is not None:
-            self.speaker_embed_tokens = speaker_embed_tokens
-
         self.embed_positions = BartLearnedPositionalEmbedding(
             config.max_position_embeddings,
             embed_dim,
@@ -679,15 +667,12 @@ class BartEncoder(BartPretrainedModel):
     def forward(
         self,
         input_ids=None,
-        speaker_ids=None,
         attention_mask=None,
         inputs_embeds=None,
-        speaker_embeds=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
         persona_ids=None,
-        persona_speaker_ids=None,
         persona_attention_mask=None,
     ):
         r"""
@@ -753,12 +738,9 @@ class BartEncoder(BartPretrainedModel):
                 # inputs_embeds: (batch, cxt_seq, hidden)
                 inputs_embeds = self.embed_tokens(input_ids) * self.embed_scale     # (batch, cxt_seq, hidden)
 
-            if speaker_embeds is None:
-                speaker_embeds = self.speaker_embed_tokens(speaker_ids)
-
             positions_embeds = self.embed_positions(input_shape)    # (cxt_seq, hidden)
 
-            hidden_states = inputs_embeds + positions_embeds + speaker_embeds    # (batch, cxt_seq, hidden)
+            hidden_states = inputs_embeds + positions_embeds    # (batch, cxt_seq, hidden)
             hidden_states = self.layernorm_embedding(hidden_states)
             hidden_states = F.dropout(hidden_states, p=self.dropout, training=self.training)
 
@@ -772,17 +754,12 @@ class BartEncoder(BartPretrainedModel):
         elif persona_ids is not None:
             # persona_ids: (batch, mem_size+1, max_mem_seq)
             persona_ids = persona_ids.view(-1, persona_ids.shape[-1])   # (batch*(mem_size+1), max_mem_seq)
-            persona_speaker_ids = persona_speaker_ids.view(-1, persona_speaker_ids.shape[-1])   # (batch*(mem_size+1), max_mem_seq)
             persona_shape = persona_ids.size()
 
-            # embed_tokens: nn.Embedding(vocab_size, config.d_model)
             persona_embeds = self.embed_tokens(persona_ids) * self.embed_scale  # (batch*(mem_size+1), max_mem_seq, hidden)
-
-            persona_speaker_embeds = self.speaker_embed_tokens(persona_speaker_ids)
-
             persona_positions_embeds = self.embed_positions(persona_shape)    # (max_mem_seq, hidden)
 
-            persona_hidden_states = persona_embeds + persona_positions_embeds + persona_speaker_embeds    # (batch*(mem_size+1), max_mem_seq, hidden)
+            persona_hidden_states = persona_embeds + persona_positions_embeds    # (batch*(mem_size+1), max_mem_seq, hidden)
             persona_hidden_states = self.layernorm_embedding(persona_hidden_states)
             persona_hidden_states = F.dropout(persona_hidden_states, p=self.dropout, training=self.training)
 
@@ -1061,6 +1038,7 @@ class BartDecoder(BartPretrainedModel):
         )
 
 
+
 class BartModel(BartPretrainedModel):
     def __init__(self, config: BartConfig):
         super().__init__(config)
@@ -1069,24 +1047,22 @@ class BartModel(BartPretrainedModel):
         self.shared = nn.Embedding(vocab_size, config.d_model, padding_idx=padding_idx)
         self.persona_shared = nn.Embedding(vocab_size, config.d_model, padding_idx=padding_idx)
 
-        self.max_speaker_size = 4  # user: 0, agent: 1, no_ref: 2, 그외(empty, pad): 3
-        self.speaker_embedding = nn.Embedding(self.max_speaker_size, config.d_model, padding_idx=3)
-
-        self.encoder = BartEncoder(config, self.shared, self.speaker_embedding)
-        self.persona_encoder = BartEncoder(config, self.persona_shared, self.speaker_embedding)
+        self.encoder = BartEncoder(config, self.shared)
+        self.persona_encoder = BartEncoder(config, self.persona_shared)
 
         self.dropout = config.dropout
 
         self.sentence_pool_layer = nn.AdaptiveAvgPool2d((1, config.d_model))
-
-        self.cxt_size = config.cxt_size
-        self.mem_size = config.mem_size
 
         self.token_attn = BartAttention(
             embed_dim=config.d_model,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
         )
+
+        self.cxt_size = config.cxt_size
+        self.mem_size = config.mem_size
+
         self.sentence_attn = BartAttention(
             embed_dim=config.d_model,
             num_heads=config.encoder_attention_heads,
@@ -1102,9 +1078,6 @@ class BartModel(BartPretrainedModel):
 
     def get_input_embeddings(self):
         return self.shared
-
-    def get_speaker_embeddings(self):
-        return self.speaker_embedding
 
     def set_input_embeddings(self, value):
         self.shared = value
@@ -1134,21 +1107,18 @@ class BartModel(BartPretrainedModel):
     def forward(
         self,
         input_ids=None,
-        speaker_ids=None,
         attention_mask=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
         encoder_outputs=None,
         past_key_values=None,
         inputs_embeds=None,
-        speaker_embeds=None,
         decoder_inputs_embeds=None,
         use_cache=None,
         output_attentions=None,
         output_hidden_states=None,
         return_dict=None,
         persona_ids=None,
-        persona_speaker_ids=None,
         persona_attention_mask=None,
         memory_labels=None,
         return_only_encoder_outputs=None,
@@ -1168,52 +1138,45 @@ class BartModel(BartPretrainedModel):
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        memory_classification_loss = None
+        persona_identification_loss = None
 
         # Train 시 encoder_outputs==None, Predict 시 encoder_outputs!=None
         if encoder_outputs is None:
-            # context encoder
+            # Context encoder
             encoder_outputs = self.encoder(
                 input_ids=input_ids,            # (batch, cxt_seq)
-                speaker_ids=speaker_ids,
                 attention_mask=attention_mask,  # (batch, cxt_seq)
                 inputs_embeds=inputs_embeds,
-                speaker_embeds=speaker_embeds,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
                 persona_ids=None,
-                persona_speaker_ids=None,
                 persona_attention_mask=None,
-            ) # BaseModelOutput(last_hidden_state, hidden_states, attentions)
-            hidden_states = encoder_outputs[0]  # 'last_hidden_state': (batch, cxt_seq, hidden)
+            )
+            hidden_states = encoder_outputs[0]  # (batch, cxt_seq, hidden)
             batch, cxt_seq, hidden = hidden_states.size()
 
-            # persona encoder
+            # Persona encoder
             persona_encoder_outputs = self.persona_encoder(
                 input_ids=None,
-                speaker_ids=None,
                 attention_mask=None,
                 inputs_embeds=None,
-                speaker_embeds=None,
                 output_attentions=output_attentions,
                 output_hidden_states=output_hidden_states,
                 return_dict=return_dict,
                 persona_ids=persona_ids,    # (batch, mem_size+1, mem_max_seq)
-                persona_speaker_ids=persona_speaker_ids,
                 persona_attention_mask=persona_attention_mask,  # (batch, mem_size+1, mem_max_seq)
             )
-            persona_hidden_states = persona_encoder_outputs[0]  # 'last_hidden_states': (batch*(mem_size+1), mem_max_seq, hidden)
-            batch, _, mem_max_seq = persona_ids.size()   # (batch, mem_size+1, mem_max_seq)
-
+            batch, _, mem_max_seq = persona_ids.size()
+            persona_hidden_states = persona_encoder_outputs[0]  # (batch*(mem_size+1), mem_max_seq, hidden)
             persona_hidden_states = persona_hidden_states.view(batch, self.mem_size+1, mem_max_seq, -1)    # (batch, mem_size+1, mem_max_seq, hidden)
 
 
-            ### Sentence-Level Attention ###
+            ##### Sentence-level Attention #####
 
             # get context sentence vectors
-            context_sep_idxes = (input_ids == 1).nonzero(as_tuple=False).view(batch, -1, 2).tolist()    # [batch, cxt_size, 2]
-            # ex: [ [[0, 46], [0, 69], ...], [[1, 50], ...], ... ]
+            context_sep_idxes = (input_ids == 2).nonzero(as_tuple=False).view(batch, -1, 2).tolist()    # [batch, cxt_size, 2], id of '</s>': 2
+            # [ [[0, 46], [0, 69], ...], [[1, 50], ...], ... ]
             for batch_idx, one_batch in enumerate(context_sep_idxes):   # one_batch: (cxt_size, 2)
                 start_seq_idx = 0
                 for utter_idx, (_, end_seq_idx) in enumerate(one_batch):
@@ -1240,58 +1203,57 @@ class BartModel(BartPretrainedModel):
             persona_sentence_vectors = persona_sentence_vectors.view(batch, self.mem_size+1, hidden)  # (batch, mem_size+1, hidden)
 
             persona_sentence_attention_mask = torch.ones(batch, self.mem_size+1, dtype=int).to(self.device) # (batch, mem_size+1)
-            empty_idxes = (persona_ids == 30004).nonzero(as_tuple=False).tolist()   # idxes of <empty> token
+            empty_idxes = (persona_ids == 50269).nonzero(as_tuple=False).tolist()   # idxes of <empty> token
             for (dim_0, dim_1, _) in empty_idxes:
                 persona_sentence_attention_mask[dim_0, dim_1] = 0
-            persona_sentence_attention_mask = _expand_mask(persona_sentence_attention_mask, persona_sentence_vectors.dtype, tgt_len=self.cxt_size)  # (batch, 1, cxt_size, mem_size+1)
 
             sentence_hidden_states, sentence_attn_weights, _ = self.sentence_attn(
                 hidden_states=context_sentence_vectors,     # Q
                 key_value_states=persona_sentence_vectors,  # K, V
-                attention_mask=persona_sentence_attention_mask,  # K, V의 attention_mask
+                attention_mask=_expand_mask(persona_sentence_attention_mask, persona_sentence_vectors.dtype, tgt_len=self.cxt_size),  # (batch, 1, cxt_size, mem_size+1)
                 output_attentions=True,
             )   # sentence_attn_weights: (batch, num_heads, cxt_size, mem_size+1)
             sentence_hidden_states = F.dropout(sentence_hidden_states, p=self.dropout, training=self.training)
 
 
-            ### compute Memory Classification loss ###
+            ### compute Persona Identification loss ###
 
             if self.training:
                 # sentence_attn_weights: (batch, num_heads, cxt_size, mem_size+1)
-                memory_classification_loss_fct = CrossEntropyLoss()
-                memory_classification_loss = memory_classification_loss_fct(sentence_attn_weights.view(batch*self.cxt_size, -1), memory_labels.view(-1))
+                persona_identification_loss_fct = CrossEntropyLoss()
+                persona_identification_loss = persona_identification_loss_fct(sentence_attn_weights.view(batch*self.cxt_size, -1), memory_labels.view(-1))
                 # logits: (batch*cxt_size, num_heads*(mem_size+1))
                 # labels: (batch*cxt_size)
 
 
-            ### Structural Branching based on attention weights ###
+            ### Architecture Branching based on attention weights ###
 
             # REF / NO_REF 예측에 따라 batch를 분리
             sentence_attn_weights_sum = torch.sum(sentence_attn_weights, dim=1)  # (batch, cxt_size, mem_size+1)
-            predictions = torch.argmax(sentence_attn_weights_sum, dim=-1)       # (batch, cxt_size)
+            predictions = torch.argmax(sentence_attn_weights_sum, dim=-1)        # (batch, cxt_size)
             ref_batch_idxes, no_ref_batch_idxes = [], []
             for batch_idx, prediction in enumerate(predictions):    # prediction: (cxt_size)
                 no_ref_prediction_cnt = (prediction == self.mem_size).nonzero(as_tuple=False).size(0)
-                # NO_REF 예측
+                # NO_REF로 예측
                 if no_ref_prediction_cnt >= len(prediction) // 2:
                     if len(no_ref_batch_idxes) == 0:
                         no_ref_hidden_states = hidden_states[batch_idx:batch_idx+1]
                     else:
                         no_ref_hidden_states = torch.cat([no_ref_hidden_states, hidden_states[batch_idx:batch_idx+1]], dim=0)
                     no_ref_batch_idxes.append(batch_idx)
-                # REF 예측
+                # REF로 예측
                 else:
                     ref_batch_idxes.append(batch_idx)
 
-            # REF 예측 시의 부가적인 구조
+            # REF 예측 시 부가적인 구조
             if len(ref_batch_idxes) > 0:
                 # repeat each sentence vector of SLA result as long as each sequence length
-                context_sep_idxes = torch.tensor(context_sep_idxes).view(batch, self.cxt_size, 2)    # (batch, cxt_size, 2)
-                context_sep_idxes = context_sep_idxes[:, :, 1]    # 각 batch에서의 [SEP] 토큰 인덱스    (batch, cxt_size)
+                context_sep_idxes = torch.tensor(context_sep_idxes).view(batch, self.cxt_size, 2)
+                context_sep_idxes = context_sep_idxes[:, :, 1]    # 각 batch에서의 [SEP] 토큰 인덱스 (batch, cxt_size)
                 for idx, ref_batch_idx in enumerate(ref_batch_idxes):
                     last_seq_idx = 0
                     for utter_idx in range(self.cxt_size):
-                        sentence_vector = sentence_hidden_states[ref_batch_idx, utter_idx].unsqueeze(0)  # (1, hidden)
+                        sentence_vector = sentence_hidden_states[ref_batch_idx, utter_idx].unsqueeze(0)
                         repeat_seq_idx = (context_sep_idxes[ref_batch_idx, utter_idx].item() + 1) - last_seq_idx
                         expand_sentence_vector = sentence_vector.repeat(repeat_seq_idx, 1)    # (repeat_seq_idx, hidden)
                         if utter_idx == 0:
@@ -1313,7 +1275,7 @@ class BartModel(BartPretrainedModel):
                 ### Token-Level Attention ###
 
                 # remove NO_REF element from memory
-                persona_hidden_states_ref = persona_hidden_states[:, :-1, :, :].view(batch, -1, hidden) # (batch, mem_size*mem_max_seq, hidden)
+                persona_hidden_states_ref = persona_hidden_states[:, :-1, :, :].view(batch, -1, hidden)  # (batch, mem_size*mem_max_seq, hidden)
                 persona_attention_mask_ref = persona_attention_mask[:, :-1, :].view(batch, -1)  # (batch, mem_size*mem_max_seq)
 
                 select_indexes = torch.tensor(ref_batch_idxes).to(self.device)
@@ -1334,9 +1296,8 @@ class BartModel(BartPretrainedModel):
 
                 ref_hidden_states = torch.cat((ref_token_hidden_states, ref_sentence_hidden_states), dim=-1)  # (batch, cxt_seq, hidden*2)
                 ref_hidden_states = self.fc1(ref_hidden_states)  # (batch, cxt_seq, hidden)
-
-                ref_hidden_states = torch.cat((ref_hidden_states, hidden_states), dim=-1)  # (batch, cxt_seq, hidden*2)
-                ref_hidden_states = self.fc2(ref_hidden_states)  # (batch, cxt_seq, hidden)
+                ref_hidden_states = torch.cat((ref_hidden_states, hidden_states), dim=-1)
+                ref_hidden_states = self.fc2(ref_hidden_states)
 
 
             ### REF와 NO_REF를 결합해 final encoder embedding 얻음 ###
@@ -1408,7 +1369,7 @@ class BartModel(BartPretrainedModel):
             encoder_attentions=encoder_outputs.attentions,
         )
         if self.training:
-            return seq2seq_model_output, memory_classification_loss
+            return seq2seq_model_output, persona_identification_loss
         else:
             return seq2seq_model_output
 
@@ -1426,7 +1387,7 @@ class BartForDialogueGeneration(BartPretrainedModel):
         super().__init__(config)
 
         config.__dict__["cxt_size"] = 10    # Context 문장 개수
-        config.__dict__["mem_size"] = 10     # Memory 문장 개수
+        config.__dict__["mem_size"] = 20    # Memory 문장 개수
 
         self.model = BartModel(config)
         self.register_buffer("final_logits_bias", torch.zeros((1, self.model.shared.num_embeddings)))
@@ -1466,14 +1427,12 @@ class BartForDialogueGeneration(BartPretrainedModel):
     def forward(
         self,
         input_ids=None,
-        speaker_ids=None,
         attention_mask=None,
         decoder_input_ids=None,
         decoder_attention_mask=None,
         encoder_outputs=None,
         past_key_values=None,
         inputs_embeds=None,
-        speaker_embeds=None,
         decoder_inputs_embeds=None,
         labels=None,
         use_cache=None,
@@ -1481,7 +1440,6 @@ class BartForDialogueGeneration(BartPretrainedModel):
         output_hidden_states=None,
         return_dict=None,
         persona_ids=None,
-        persona_speaker_ids=None,
         persona_attention_mask=None,
         memory_labels=None,
     ):
@@ -1501,31 +1459,28 @@ class BartForDialogueGeneration(BartPretrainedModel):
         if labels is not None:
             if decoder_input_ids is None:
                 decoder_input_ids = shift_tokens_right(
-                    labels, self.config.pad_token_id, self.config.decoder_start_token_id
+                    labels, self.config.pad_token_id, self.config.decoder_start_token_id # labels가 input_ids가 됨
                 )
 
         outputs = self.model(
             input_ids,
-            speaker_ids=speaker_ids,
             attention_mask=attention_mask,
             decoder_input_ids=decoder_input_ids,
             encoder_outputs=encoder_outputs,
             decoder_attention_mask=decoder_attention_mask,
             past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
-            speaker_embeds=speaker_embeds,
             decoder_inputs_embeds=decoder_inputs_embeds,
             use_cache=use_cache,
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
-            persona_ids=persona_ids,    # (batch, mem_size+1, mem_max_seq)
-            persona_speaker_ids=persona_speaker_ids,
+            persona_ids=persona_ids,
             persona_attention_mask=persona_attention_mask,
             memory_labels=memory_labels,
         )
         if self.training:
-            outputs, memory_classification_loss = outputs[0], outputs[1]
+            outputs, persona_identification_loss = outputs[0], outputs[1]
 
         lm_logits = self.lm_head(outputs[0]) + self.final_logits_bias   # (batch, tgt_seq_len, vocab_size)
 
@@ -1552,7 +1507,7 @@ class BartForDialogueGeneration(BartPretrainedModel):
             encoder_attentions=outputs.encoder_attentions,
         )
         if self.training:    # Train
-            return seq2seq_lm_output, memory_classification_loss
+            return seq2seq_lm_output, persona_identification_loss
         else:   # Predict
             return seq2seq_lm_output
 
@@ -1566,14 +1521,12 @@ class BartForDialogueGeneration(BartPretrainedModel):
 
         return {
             "input_ids": None,
-            "speaker_ids": None,
-            "persona_ids": None,
-            "persona_speaker_ids": None,
             "encoder_outputs": encoder_outputs,
             "past_key_values": past,
             "decoder_input_ids": decoder_input_ids,
             "attention_mask": attention_mask,
             "use_cache": use_cache,  # change this to avoid caching (presumably for debugging)
+
         }
 
     def adjust_logits_during_generation(self, logits, cur_len, max_length):

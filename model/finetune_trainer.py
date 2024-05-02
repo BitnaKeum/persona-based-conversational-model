@@ -18,6 +18,8 @@ import os
 import sys
 from dataclasses import dataclass, field
 from typing import Optional
+from sys import argv
+import json
 
 import transformers
 from transformers import (
@@ -44,7 +46,7 @@ from utils import (
     write_txt_file,
 )
 
-from model_bart import makeMultiTurnChatbot
+from modeling_bart import makeMultiTurnChatbot
 from trainer_seq2seq import Seq2SeqTrainer
 import faulthandler
 
@@ -91,7 +93,7 @@ class DataTrainingArguments:
         default=1024,
         metadata={
             "help": "The maximum total input sequence length after tokenization. Sequences longer "
-            "than this will be truncated, sequences shorter will be padded."
+            "than this will be truncated, sequences shorter will be ped."
         },
     )
     max_target_length: Optional[int] = field(
@@ -215,8 +217,6 @@ def main():
     # Freeze persona memory embedding
     print('\nFreeze persona encoder ...\n')
     freeze_persona_embeds(model.model)
-    # for (name, param) in model.model.named_parameters():
-    #     print(name, ': ', param.requires_grad)
 
     dataset_class = Seq2SeqDataset
 
@@ -278,11 +278,11 @@ def main():
     )
 
     all_metrics = {}
-
+    # Training
     if training_args.do_train:
         logger.info("*** Train ***")
 
-        train_result = trainer.train(   # transformer.Trainer.train()
+        train_result = trainer.train(
             resume_from_checkpoint=model_args.model_name_or_path if os.path.isdir(model_args.model_name_or_path) else None
         )
         metrics = train_result.metrics
@@ -301,6 +301,7 @@ def main():
             # so that you can share your model easily on huggingface.co/models =)
             tokenizer.save_pretrained(training_args.output_dir)
 
+    # Evaluation
     elif training_args.do_eval:
         logger.info("*** Evaluate ***")
 
@@ -334,64 +335,40 @@ def main():
 
             if training_args.predict_with_generate:
                 test_preds = tokenizer.batch_decode(
-                    test_output.predictions, skip_special_tokens=False, clean_up_tokenization_spaces=True
+                    test_output.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
                 )
-
-                # special tokens 처리
-                # "<user>", "<agent>", "<agent_persona>", "<user_persona>", "<empty>", "<no_ref>" => skip
-                # "agent", "user", "@이름@", "@브랜드명@", "@홈페이지@", "@영화@", "@날짜@" => skip하지 않음
-                try:
-                    with open(f"{model_args.model_name_or_path}/special_tokens_map.json", "r", encoding="utf8") as f:
-                        special_tokens_dict = eval(f.readline())
-                except:
-                    special_tokens_dict = {
-                        "bos_token": "</s>", "eos_token": "</s>", "unk_token": "<unk>", "pad_token": "<pad>", "mask_token": "<mask>",
-                        "additional_special_tokens": [
-                            "<user>", "<agent>", "<agent_persona>", "<user_persona>", "<empty>", "<no_ref>",
-                            "agent", "user", "@이름@", "@브랜드명@", "@홈페이지@", "@영화@", "@날짜@"
-                        ],
-                    }
-                special_tokens_list = list(special_tokens_dict.values())
-                special_tokens = special_tokens_list[:-1]   # additional_special_tokens 제외
-                for token in special_tokens_list[-1]:   # additional_special_tokens 처리
-                    if token == "agent" or token == "user" or token[0] == "@":
-                        continue
-                    special_tokens.append(token)
-
-                test_preds_skip = []
-                for pred in test_preds:
-                    for token in special_tokens:
-                        pred = pred.replace(token, "")
-                    # test_preds_skip.append(clean_up_tokenization(pred))
-                    test_preds_skip.append(pred)
-                test_preds = test_preds_skip
 
                 test_preds = lmap(str.strip, test_preds)
                 write_txt_file(test_preds, os.path.join(training_args.output_dir, "test_generations.txt"))
 
-                # Distinct 지표 측정
-                from paddlenlp.metrics import Distinct
-                n_size = 2
-                distinct = Distinct(n_size)
-                for pred in test_preds:
-                    tokens = tokenizer.tokenize(pred)
-                    if len(tokens) < n_size:
-                        continue
-                    distinct.add_inst(tokens)
-                metrics[f"test_distinct_{n_size}"] = round(distinct.score(), 4)
+                # Distinct 지표 평가
+                try:
+                    from paddlenlp.metrics import Distinct
+                    for n_size in [2, 3]:
+                        distinct = Distinct(n_size)
 
-                # BERTScore 지표 측정
-                from KoBERTScore import BERTScore
-                model_name = "monologg/koelectra-base-v2-discriminator"
-                bertscore = BERTScore(model_name_or_path=model_name, best_layer=4)
-                with open(f'{data_args.data_dir}/test.target', 'r', encoding='utf8') as f:
-                    test_targets = f.readlines()
-                test_targets = test_targets[:len(test_preds)]
-                for line_num, target in enumerate(test_targets):
-                    target = target.replace('\n', '').split('</summary>')[-1]
-                    test_targets[line_num] = target
-                bert_scores = bertscore(test_targets, test_preds, batch_size=128)
-                metrics[f"test_bertscore"] = round(np.mean(bert_scores), 4)
+                        for pred in test_preds:
+                            tokens = tokenizer.tokenize(pred)
+                            if len(tokens) < n_size:
+                                continue
+                            distinct.add_inst(tokens)
+
+                        metrics[f"test_distinct_{n_size}"] = round(distinct.score(), 3)
+                except:
+                    print("Fail to calculate Distinct")
+
+                # BERTScore 지표 평가
+                try:
+                    from bert_score import score
+                    import torch
+                    with open(f'{data_args.data_dir}/test.target', 'r', encoding='utf8') as f:
+                        test_targets = f.readlines()
+                    test_targets = test_targets[:len(test_preds)]
+                    P, R, F1 = score(test_preds, test_targets, lang='en', verbose=True)
+                    bert_score = round(torch.mean(F1).item(), 3)
+                    metrics[f"test_bertscore"] = bert_score
+                except:
+                    print("Fail to calculate BERTScore")
 
             handle_metrics("test", metrics, training_args.output_dir)
             all_metrics.update(metrics)

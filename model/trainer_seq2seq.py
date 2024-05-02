@@ -198,13 +198,11 @@ class Seq2SeqTrainer(Trainer):
             self.model,
             inputs["input_ids"],
             attention_mask=inputs["attention_mask"],
-            speaker_ids=inputs["speaker_ids"],
             persona_ids=inputs["persona_ids"],
-            persona_speaker_ids=inputs["persona_speaker_ids"],
             persona_attention_mask=inputs["persona_attention_mask"],
+            memory_labels=inputs["memory_labels"],
             **gen_kwargs,
-        )
-        # generated_tokens: (batch, max_seq_len)
+        )   # (batch, max_seq_len)
 
         # in case the batch is shorter than max length, the output should be padded
         if generated_tokens.shape[-1] < gen_kwargs["max_length"]:
@@ -214,7 +212,7 @@ class Seq2SeqTrainer(Trainer):
             if self.use_amp:
                 with autocast():
                     outputs = model(**inputs)
-            else:
+            else:   # here
                 outputs = model(**inputs)
 
             if has_labels:
@@ -233,6 +231,7 @@ class Seq2SeqTrainer(Trainer):
             labels = self._pad_tensors_to_max_len(labels, gen_kwargs["max_length"])
 
         return (loss, generated_tokens, labels)
+
 
     def _pad_tensors_to_max_len(self, tensor, max_length):
         if self.tokenizer is None:
